@@ -61,6 +61,33 @@ app.post('/proxy-deepgram', upload.single('audio'), async (req, res) => {
     }
 });
 
+// ============================================================
+// PROXY CLAUDE API — T28E
+// Variável de ambiente necessária: ANTHROPIC_API_KEY
+// ============================================================
+app.post('/proxy-claude', async (req, res) => {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) {
+    return res.status(500).json({ error: 'ANTHROPIC_API_KEY não configurada no servidor.' });
+  }
+  try {
+    const response = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01'
+      },
+      body: JSON.stringify(req.body)
+    });
+    const data = await response.json();
+    res.status(response.status).json(data);
+  } catch (err) {
+    console.error('[proxy-claude] Erro:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.post('/generate-docx', async (req, res) => {
     const jobId = uuidv4();
     const jobDir = '/tmp/ama-jobs/' + jobId;
