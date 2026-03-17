@@ -407,6 +407,89 @@ app.post('/generate-docx', async (req, res) => {
            }
 });
 
+// ============================================================
+// EXTRACT CALORIMETRIA — D2
+// ============================================================
+app.options('/extract-calorimetria', (req, res) => {
+  res.set({
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Methods': 'POST, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization'
+  });
+  res.sendStatus(200);
+});
+
+app.post('/extract-calorimetria', async (req, res) => {
+  res.set({
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Methods': 'POST, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization'
+  });
+
+  const { file_base64, file_type, equipamento_hint } = req.body;
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+
+  if (!apiKey) {
+    return res.status(500).json({ error: 'ANTHROPIC_API_KEY nao configurada no servidor.' });
+  }
+
+  if (!file_base64 || !file_type) {
+    return res.status(400).json({ error: 'file_base64 e file_type sao obrigatorios.' });
+  }
+
+  const tiposImagem = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
+  const tiposDoc = ['application/pdf'];
+  const tipoValido = [...tiposImagem, ...tiposDoc].includes(file_type);
+
+  if (!tipoValido) {
+    return res.status(400).json({ error: 'Tipo de arquivo nao suportado: ' + file_type });
+  }
+
+  const anthropic = new Anthropic({ apiKey });
+
+  const EXTRACTION_PROMPT = 'Voce e um extrator especializado em laudos de calorimetria indireta medica. Extraia todos os campos e retorne APENAS um JSON valido, sem texto adicional. Equipamento hint: ' + (equipamento_hint || 'desconhecido') + '. JSON esperado: {"sucesso":true,"campos":{"cal_data":null,"cal_equipamento":null,"cal_tmr_kcal":null,"cal_tmb_kcal":null,"cal_tmb_previsto_kcal":null,"cal_get_kcal":null,"cal_rq":null,"cal_gordura_percentual":null,"cal_carboidrato_percentual":null,"cal_vo2_ml_kg_min":null,"cal_ve_l_min":null,"cal_estilo_vida":null},"confianca":{"cal_data":"baixa","cal_equipamento":"baixa","cal_tmr_kcal":"baixa","cal_tmb_kcal":"baixa","cal_tmb_previsto_kcal":"baixa","cal_get_kcal":"baixa","cal_rq":"baixa","cal_gordura_percentual":"baixa","cal_carboidrato_percentual":"baixa","cal_vo2_ml_kg_min":"baixa","cal_ve_l_min":"baixa","cal_estilo_vida":"baixa"},"comentario_clinico":"resumo em 2-3 frases em portugues"}';
+
+  const fileContentBlock = tiposDoc.includes(file_type)
+    ? { type: 'document', source: { type: 'base64', media_type: file_type, data: file_base64 } }
+    : { type: 'image', source: { type: 'base64', media_type: file_type, data: file_base64 } };
+
+  try {
+    const extractionMsg = await anthropic.messages.create({
+      model: 'claude-sonnet-4-20250514',
+      max_tokens: 2000,
+      messages: [{
+        role: 'user',
+        content: [
+          fileContentBlock,
+          { type: 'text', text: EXTRACTION_PROMPT }
+        ]
+      }]
+    });
+
+    let rawText = extractionMsg.content[0].text.trim();
+    rawText = rawText.replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/i, '');
+
+    let extractedData;
+    try {
+      extractedData = JSON.parse(rawText);
+    } catch (parseErr) {
+      console.error('[extract-calorimetria] JSON parse falhou:', rawText.slice(0, 300));
+      return res.status(500).json({ sucesso: false, error: 'Falha ao interpretar resposta.', raw: rawText.slice(0, 500) });
+    }
+
+    res.json({
+      sucesso: true,
+      campos: extractedData.campos || {},
+      confianca: extractedData.confianca || {},
+      comentario_clinico: extractedData.comentario_clinico || ''
+    });
+
+  } catch (error) {
+    console.error('[extract-calorimetria] Erro:', error);
+    res.status(500).json({ sucesso: false, error: error.message });
+  }
+});
+
 app.listen(PORT, () => {
     console.log('[T29B] AMA Docx Server porta ' + PORT + ' - T29B corrigido');
 });
