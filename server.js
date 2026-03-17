@@ -490,6 +490,131 @@ app.post('/extract-calorimetria', async (req, res) => {
   }
 });
 
+
+// ============================================================
+// ENDPOINT D3 — ERGOESPIROMETRIA + ZONAS DE TREINO
+// ============================================================
+app.options('/extract-ergoespirometria', (req, res) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Content-Type');
+  res.sendStatus(200);
+});
+
+app.post('/extract-ergoespirometria', async (req, res) => {
+  try {
+    const { file_base64, file_type, equipamento_hint } = req.body;
+    if (!file_base64) {
+      return res.status(400).json({ sucesso: false, error: 'file_base64 obrigatorio' });
+    }
+    const isExcel = file_type && (
+      file_type.includes('spreadsheet') ||
+      file_type.includes('excel') ||
+      file_type.includes('xlsx')
+    );
+    const resultado = isExcel
+      ? await extrairErgoDoExcel(file_base64)
+      : await extrairErgoDoPdf(file_base64, file_type, equipamento_hint);
+    res.json(resultado);
+  } catch (error) {
+    console.error('Erro /extract-ergoespirometria:', error);
+    res.status(500).json({ sucesso: false, error: error.message });
+  }
+});
+
+async function extrairErgoDoExcel(file_base64) {
+  const XLSX = require('xlsx');
+  const buffer = Buffer.from(file_base64, 'base64');
+  const workbook = XLSX.read(buffer, { type: 'buffer' });
+  const sheet = workbook.Sheets[workbook.SheetNames[0]];
+  const rows = XLSX.utils.sheet_to_json(sheet, { defval: null });
+  if (!rows || rows.length === 0) {
+    return { sucesso: false, error: 'Excel vazio ou formato nao reconhecido' };
+  }
+  const get = (row, ...keys) => {
+    for (const k of keys) {
+      const found = Object.keys(row).find(rk => rk.toLowerCase().includes(k.toLowerCase()));
+      if (found !== undefined && row[found] !== null) return parseFloat(row[found]) || row[found];
+    }
+    return null;
+  };
+  const dadosBrutos = rows.map(row => ({
+    estagio:        get(row, 'est', 'stage'),
+    tempo_min:      get(row, 'tempo', 'time', 'min'),
+    fc:             get(row, 'fc', 'hr', 'heart'),
+    vo2_ml_kg_min:  get(row, 'vo2'),
+    vco2:           get(row, 'vco2'),
+    ve:             get(row, 've', 'vent'),
+    rer:            get(row, 'rer', 'rq'),
+    oxi_gord_g_min: get(row, 'oxi gord', 'fat', 'gord'),
+    oxi_cho_g_min:  get(row, 'oxi cho', 'cho', 'carb'),
+    perc_gord:      get(row, '% gord', '%gord', 'fat%'),
+    perc_cho:       get(row, '% cho', '%cho', 'cho%'),
+    vel_km_h:       get(row, 'vel', 'speed', 'km')
+  })).filter(r => r.fc !== null);
+
+  let fatmaxEstagio = null, fatmaxVal = -Infinity;
+  dadosBrutos.forEach(r => {
+    if (r.oxi_gord_g_min !== null && r.oxi_gord_g_min > fatmaxVal) {
+      fatmaxVal = r.oxi_gord_g_min;
+      fatmaxEstagio = r;
+    }
+  });
+
+  const promptLimiares = `Analise estes dados de ergoespirometria estagio a estagio e identifique L1 (primeiro limiar ventilatorio) e L2 (segundo limiar ventilatorio). Retorne APENAS JSON valido:\n{"ergo_l1_fc":numero,"ergo_l1_vel_km_h":numero,"ergo_l2_fc":numero,"ergo_l2_vel_km_h":numero,"ergo_fc_repouso":numero,"ergo_fc_max":numero,"ergo_vo2max_ml_kg_min":numero,"ergo_protocolo":"texto ou null","ergo_equipamento":"HandyMet MDI","ergo_data":null}\nDados: ${JSON.stringify(dadosBrutos.slice(0, 30))}`;
+
+  const respLimiares = await anthropic.messages.create({
+    model: 'claude-opus-4-5', max_tokens: 800,
+    messages: [{ role: 'user', content: promptLimiares }]
+  });
+  const campos = JSON.parse(respLimiares.content[0].text.trim().replace(/```json|```/g, '').trim());
+
+  const l1 = campos.ergo_l1_fc, l2 = campos.ergo_l2_fc;
+  const fcMax = campos.ergo_fc_max, fcRep = campos.ergo_fc_repouso;
+
+  const promptComentario = `Voce e o Dr. Mateus Antunes Nogueira, especialista em medicina do exercicio. Escreva comentario clinico em 2-3 frases, primeira pessoa, tom tecnico direto. Va ao achado mais relevante. Proibido: robusto, crucial, abordagem.\nDados: L1=${l1}bpm, L2=${l2}bpm, VO2max=${campos.ergo_vo2max_ml_kg_min}ml/kg/min, FATmax=${fatmaxEstagio ? fatmaxEstagio.oxi_gord_g_min : null}g/min a ${fatmaxEstagio ? fatmaxEstagio.fc : null}bpm`;
+
+  const respComentario = await anthropic.messages.create({
+    model: 'claude-opus-4-5', max_tokens: 300,
+    messages: [{ role: 'user', content: promptComentario }]
+  });
+
+  return {
+    sucesso: true,
+    campos: {
+      ...campos,
+      ergo_fatmax_fc: fatmaxEstagio ? fatmaxEstagio.fc : null,
+      ergo_fatmax_vel_km_h: fatmaxEstagio ? fatmaxEstagio.vel_km_h : null,
+      ergo_fatmax_g_min: fatmaxEstagio ? fatmaxEstagio.oxi_gord_g_min : null,
+      zona_1_fc_min: fcRep, zona_1_fc_max: Math.round(l1 * 0.85),
+      zona_2_fc_min: Math.round(l1 * 0.85), zona_2_fc_max: l1,
+      zona_3_fc_min: l1, zona_3_fc_max: Math.round((l1 + l2) / 2),
+      zona_4_fc_min: Math.round((l1 + l2) / 2), zona_4_fc_max: l2,
+      zona_5_fc_min: l2, zona_5_fc_max: fcMax
+    },
+    confianca: Object.fromEntries(
+      ['ergo_data','ergo_equipamento','ergo_protocolo','ergo_fc_repouso','ergo_fc_max',
+       'ergo_vo2max_ml_kg_min','ergo_l1_fc','ergo_l1_vel_km_h','ergo_l2_fc','ergo_l2_vel_km_h',
+       'ergo_fatmax_fc','ergo_fatmax_vel_km_h','ergo_fatmax_g_min',
+       'zona_1_fc_min','zona_1_fc_max','zona_2_fc_min','zona_2_fc_max',
+       'zona_3_fc_min','zona_3_fc_max','zona_4_fc_min','zona_4_fc_max',
+       'zona_5_fc_min','zona_5_fc_max'].map(k => [k, 'alta'])
+    ),
+    ergo_dados_brutos: dadosBrutos,
+    comentario_clinico: respComentario.content[0].text.trim()
+  };
+}
+
+async function extrairErgoDoPdf(file_base64, file_type, equipamento_hint) {
+  const response = await anthropic.messages.create({
+    model: 'claude-opus-4-5', max_tokens: 3000,
+    messages: [{ role: 'user', content: [
+      { type: 'document', source: { type: 'base64', media_type: file_type || 'application/pdf', data: file_base64 } },
+      { type: 'text', text: `Extrator de ergoespirometria. Retorne APENAS JSON:\n{"sucesso":true,"campos":{"ergo_data":"DD/MM/AAAA ou null","ergo_equipamento":"nome ou null","ergo_protocolo":"texto ou null","ergo_fc_repouso":numero,"ergo_fc_max":numero,"ergo_vo2max_ml_kg_min":numero,"ergo_l1_fc":numero,"ergo_l1_vel_km_h":numero,"ergo_l2_fc":numero,"ergo_l2_vel_km_h":numero,"ergo_fatmax_fc":numero,"ergo_fatmax_vel_km_h":numero,"ergo_fatmax_g_min":numero,"zona_1_fc_min":numero,"zona_1_fc_max":numero,"zona_2_fc_min":numero,"zona_2_fc_max":numero,"zona_3_fc_min":numero,"zona_3_fc_max":numero,"zona_4_fc_min":numero,"zona_4_fc_max":numero,"zona_5_fc_min":numero,"zona_5_fc_max":numero},"confianca":{},"ergo_dados_brutos":[],"comentario_clinico":"2-3 frases em portugues, primeira pessoa."}\nEquipamento: ${equipamento_hint || 'HandyMet MDI'}` }
+    ]}]
+  });
+  return JSON.parse(response.content[0].text.trim().replace(/```json|```/g, '').trim());
+}
 app.listen(PORT, () => {
     console.log('[T29B] AMA Docx Server porta ' + PORT + ' - T29B corrigido');
 });
