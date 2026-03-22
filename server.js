@@ -405,210 +405,42 @@ app.post('/generate-docx', async (req, res) => {
 });
 
 // ============================================================
-// PROXY UPLOAD LOGO — R04-B
-// Recebe arquivo de imagem via multipart/form-data
-// Salva no Google Drive na pasta AMA_Uploads/Clinicas/{id_clinica}/logo/
-// Retorna URL pública do arquivo
-// Variável de ambiente necessária: GOOGLE_SERVICE_ACCOUNT_JSON
+// PROXY MAKE.COM — R05
+// Uso: POST /proxy-make com header x-webhook-url: <url do webhook>
+// Repassa o body JSON para o webhook do Make.com contornando CSP do Softr
 // ============================================================
-
-app.options('/proxy-upload-logo', function(req, res) {
+app.options('/proxy-make', (req, res) => {
     res.set({
         'Access-Control-Allow-Origin': '*',
         'Access-Control-Allow-Methods': 'POST, OPTIONS',
-        'Access-Control-Allow-Headers': 'Content-Type'
+        'Access-Control-Allow-Headers': 'Content-Type, x-webhook-url'
     });
     res.sendStatus(200);
 });
 
-app.post('/proxy-upload-logo', upload.single('logo'), async function(req, res) {
+app.post('/proxy-make', async (req, res) => {
     res.set({
         'Access-Control-Allow-Origin': '*',
         'Access-Control-Allow-Methods': 'POST, OPTIONS',
-        'Access-Control-Allow-Headers': 'Content-Type'
+        'Access-Control-Allow-Headers': 'Content-Type, x-webhook-url'
     });
-
+    const webhookUrl = req.headers['x-webhook-url'];
+    if (!webhookUrl || !webhookUrl.startsWith('https://hook.us2.make.com/')) {
+        return res.status(400).json({ error: 'Header x-webhook-url ausente ou inválido.' });
+    }
     try {
-        if (!req.file) {
-            return res.status(400).json({ error: 'Arquivo de logo ausente' });
-        }
-
-        var idClinica = req.body.id_clinica || 'SEM_ID';
-
-        // Validar tipo de arquivo
-        var tiposPermitidos = ['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/svg+xml'];
-        if (!tiposPermitidos.includes(req.file.mimetype)) {
-            return res.status(400).json({ error: 'Tipo de arquivo nao permitido. Use JPG, PNG, GIF, WEBP ou SVG.' });
-        }
-
-        // Validar tamanho (max 5MB)
-        if (req.file.size > 5 * 1024 * 1024) {
-            return res.status(400).json({ error: 'Arquivo muito grande. Maximo 5MB.' });
-        }
-
-        // Carregar service account
-        var saJson = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
-        if (!saJson) {
-            return res.status(500).json({ error: 'GOOGLE_SERVICE_ACCOUNT_JSON nao configurada no servidor' });
-        }
-
-        var sa;
-        try {
-            sa = JSON.parse(saJson);
-        } catch (e) {
-            return res.status(500).json({ error: 'GOOGLE_SERVICE_ACCOUNT_JSON invalida: ' + e.message });
-        }
-
-        // Gerar JWT para autenticação com Google
-        var jwt = await gerarJwtGoogle(sa);
-        var accessToken = await obterAccessToken(jwt);
-
-        // Buscar ou criar estrutura de pastas no Drive
-        var pastaRaizId = await buscarOuCriarPasta(accessToken, 'AMA_Uploads', null);
-        var pastaClinicasId = await buscarOuCriarPasta(accessToken, 'Clinicas', pastaRaizId);
-        var pastaClinicaId = await buscarOuCriarPasta(accessToken, idClinica, pastaClinicasId);
-        var pastaLogoId = await buscarOuCriarPasta(accessToken, 'logo', pastaClinicaId);
-
-        // Fazer upload do arquivo
-        var extensao = req.file.originalname.split('.').pop() || 'png';
-        var nomeArquivo = 'logo_' + idClinica + '_' + Date.now() + '.' + extensao;
-
-        var fileId = await uploadArquivoDrive(accessToken, req.file.buffer, req.file.mimetype, nomeArquivo, pastaLogoId);
-
-        // Tornar público
-        await tornarPublico(accessToken, fileId);
-
-        // Retornar URL
-        var url = 'https://drive.google.com/uc?export=view&id=' + fileId;
-
-        res.json({
-            sucesso: true,
-            logo_url: url,
-            file_id: fileId,
-            nome: nomeArquivo
+        const response = await fetch(webhookUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(req.body)
         });
-
+        const text = await response.text();
+        res.status(response.status).send(text);
     } catch (err) {
-        console.error('[proxy-upload-logo] Erro:', err.message);
+        console.error('[proxy-make] Erro:', err.message);
         res.status(500).json({ error: err.message });
     }
 });
-
-// ID do Shared Drive AMA Platform Storage
-var SHARED_DRIVE_ID = '0AIyNCQeWe9-AUk9PVA';
-
-// ── Funções auxiliares Drive ──────────────────────────────────
-
-async function gerarJwtGoogle(sa) {
-    var header = Buffer.from(JSON.stringify({ alg: 'RS256', typ: 'JWT' })).toString('base64url');
-    var now = Math.floor(Date.now() / 1000);
-    var payload = Buffer.from(JSON.stringify({
-        iss: sa.client_email,
-        scope: 'https://www.googleapis.com/auth/drive',
-        aud: 'https://oauth2.googleapis.com/token',
-        iat: now,
-        exp: now + 3600
-    })).toString('base64url');
-
-    var crypto = require('crypto');
-    var sign = crypto.createSign('RSA-SHA256');
-    sign.update(header + '.' + payload);
-    var signature = sign.sign(sa.private_key, 'base64url');
-
-    return header + '.' + payload + '.' + signature;
-}
-
-async function obterAccessToken(jwt) {
-    var resp = await fetch('https://oauth2.googleapis.com/token', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: 'grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion=' + jwt
-    });
-    var data = await resp.json();
-    if (!data.access_token) {
-        throw new Error('Falha ao obter access token: ' + JSON.stringify(data));
-    }
-    return data.access_token;
-}
-
-async function buscarOuCriarPasta(token, nome, parentId) {
-    // Buscar pasta existente no Shared Drive
-    var query = "mimeType='application/vnd.google-apps.folder' and name='" + nome + "' and trashed=false";
-    if (parentId) query += " and '" + parentId + "' in parents";
-
-    var url = 'https://www.googleapis.com/drive/v3/files?q=' + encodeURIComponent(query) +
-        '&fields=files(id,name)&includeItemsFromAllDrives=true&supportsAllDrives=true&corpora=drive&driveId=' + SHARED_DRIVE_ID;
-
-    var resp = await fetch(url, {
-        headers: { 'Authorization': 'Bearer ' + token }
-    });
-    var data = await resp.json();
-
-    if (data.files && data.files.length > 0) {
-        return data.files[0].id;
-    }
-
-    // Criar pasta no Shared Drive
-    var meta = { name: nome, mimeType: 'application/vnd.google-apps.folder' };
-    if (parentId) {
-        meta.parents = [parentId];
-    } else {
-        meta.parents = [SHARED_DRIVE_ID];
-    }
-
-    var createResp = await fetch('https://www.googleapis.com/drive/v3/files?supportsAllDrives=true', {
-        method: 'POST',
-        headers: {
-            'Authorization': 'Bearer ' + token,
-            'Content-Type': 'application/json'
-        },
-        body: JSON.stringify(meta)
-    });
-    var created = await createResp.json();
-    if (!created.id) throw new Error('Falha ao criar pasta ' + nome + ': ' + JSON.stringify(created));
-    return created.id;
-}
-
-async function uploadArquivoDrive(token, buffer, mimetype, nome, parentId) {
-    var meta = JSON.stringify({ name: nome, parents: [parentId] });
-    var boundary = '-------AMAUploadBoundary';
-    var delimiter = '\r\n--' + boundary + '\r\n';
-    var closeDelimiter = '\r\n--' + boundary + '--';
-
-    var metaPart = delimiter + 'Content-Type: application/json\r\n\r\n' + meta;
-    var filePart = delimiter + 'Content-Type: ' + mimetype + '\r\n\r\n';
-    var closepart = closeDelimiter;
-
-    var metaBuffer = Buffer.from(metaPart);
-    var filePartBuffer = Buffer.from(filePart);
-    var closeBuffer = Buffer.from(closepart);
-    var body = Buffer.concat([metaBuffer, filePartBuffer, buffer, closeBuffer]);
-
-    var resp = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id&supportsAllDrives=true', {
-        method: 'POST',
-        headers: {
-            'Authorization': 'Bearer ' + token,
-            'Content-Type': 'multipart/related; boundary=' + boundary,
-            'Content-Length': body.length
-        },
-        body: body
-    });
-    var data = await resp.json();
-    if (!data.id) throw new Error('Falha no upload: ' + JSON.stringify(data));
-    return data.id;
-}
-
-async function tornarPublico(token, fileId) {
-    await fetch('https://www.googleapis.com/drive/v3/files/' + fileId + '/permissions', {
-        method: 'POST',
-        headers: {
-            'Authorization': 'Bearer ' + token,
-            'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({ role: 'reader', type: 'anyone' })
-    });
-}
-
 
 app.listen(PORT, () => {
     console.log('[T29B] AMA Docx Server porta ' + PORT + ' - T29B corrigido');
