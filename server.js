@@ -494,6 +494,9 @@ app.post('/proxy-upload-logo', upload.single('logo'), async function(req, res) {
     }
 });
 
+// ID do Shared Drive AMA Platform Storage
+var SHARED_DRIVE_ID = '0AIyNCQeWe9-AUk9PVA';
+
 // ── Funções auxiliares Drive ──────────────────────────────────
 
 async function gerarJwtGoogle(sa) {
@@ -529,11 +532,14 @@ async function obterAccessToken(jwt) {
 }
 
 async function buscarOuCriarPasta(token, nome, parentId) {
-    // Buscar pasta existente
+    // Buscar pasta existente no Shared Drive
     var query = "mimeType='application/vnd.google-apps.folder' and name='" + nome + "' and trashed=false";
     if (parentId) query += " and '" + parentId + "' in parents";
 
-    var resp = await fetch('https://www.googleapis.com/drive/v3/files?q=' + encodeURIComponent(query) + '&fields=files(id,name)', {
+    var url = 'https://www.googleapis.com/drive/v3/files?q=' + encodeURIComponent(query) +
+        '&fields=files(id,name)&includeItemsFromAllDrives=true&supportsAllDrives=true&corpora=drive&driveId=' + SHARED_DRIVE_ID;
+
+    var resp = await fetch(url, {
         headers: { 'Authorization': 'Bearer ' + token }
     });
     var data = await resp.json();
@@ -542,11 +548,15 @@ async function buscarOuCriarPasta(token, nome, parentId) {
         return data.files[0].id;
     }
 
-    // Criar pasta
+    // Criar pasta no Shared Drive
     var meta = { name: nome, mimeType: 'application/vnd.google-apps.folder' };
-    if (parentId) meta.parents = [parentId];
+    if (parentId) {
+        meta.parents = [parentId];
+    } else {
+        meta.parents = [SHARED_DRIVE_ID];
+    }
 
-    var createResp = await fetch('https://www.googleapis.com/drive/v3/files', {
+    var createResp = await fetch('https://www.googleapis.com/drive/v3/files?supportsAllDrives=true', {
         method: 'POST',
         headers: {
             'Authorization': 'Bearer ' + token,
@@ -574,7 +584,7 @@ async function uploadArquivoDrive(token, buffer, mimetype, nome, parentId) {
     var closeBuffer = Buffer.from(closepart);
     var body = Buffer.concat([metaBuffer, filePartBuffer, buffer, closeBuffer]);
 
-    var resp = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id', {
+    var resp = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id&supportsAllDrives=true', {
         method: 'POST',
         headers: {
             'Authorization': 'Bearer ' + token,
