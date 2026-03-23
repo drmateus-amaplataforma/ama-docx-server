@@ -685,6 +685,42 @@ app.post('/proxy-upload-profissional', upload.single('arquivo'), async function(
     }
 });
 
+// ============================================================
+// PROXY-MAKE — Repassa JSON para qualquer webhook Make.com
+// Usado por: formulários de cadastro, blocos D1–D5
+// Header obrigatório: x-webhook-url
+// ============================================================
+app.options('/proxy-make', function(req, res) {
+      res.set({
+              'Access-Control-Allow-Origin': '*',
+              'Access-Control-Allow-Methods': 'POST, OPTIONS',
+              'Access-Control-Allow-Headers': 'Content-Type, x-webhook-url'
+      });
+      res.sendStatus(200);
+});
+
+app.post('/proxy-make', async function(req, res) {
+      res.set('Access-Control-Allow-Origin', '*');
+      var webhookUrl = req.headers['x-webhook-url'];
+      if (!webhookUrl) {
+              return res.status(400).json({ error: 'Header x-webhook-url ausente.' });
+      }
+      try {
+              var response = await fetch(webhookUrl, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(req.body)
+              });
+              var text = await response.text();
+              var data;
+              try { data = JSON.parse(text); } catch(e) { data = { raw: text }; }
+              res.status(response.status).json(data);
+      } catch (err) {
+              console.error('[proxy-make] Erro:', err.message);
+              res.status(500).json({ error: err.message });
+      }
+});
+
 app.listen(PORT, () => {
     console.log('[T29B] AMA Docx Server porta ' + PORT + ' - T29B corrigido');
 });
