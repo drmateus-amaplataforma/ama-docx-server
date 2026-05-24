@@ -112,13 +112,15 @@ app.post('/generate-pdf', async (req, res) => {
         const browser = await getBrowser();
         page = await browser.newPage();
         await page.setContent(html, { waitUntil: 'networkidle0', timeout: 45000 });
-        const pdfBuffer = await page.pdf({
+        // Puppeteer 23+ retorna Uint8Array; converte para Buffer para Express
+        // serializar como binary (caso contrario fica JSON {"0":37,"1":80,...})
+        const pdfBuffer = Buffer.from(await page.pdf({
             format,
             landscape,
             printBackground: true,
             margin: { top: '0', right: '0', bottom: '0', left: '0' },
             preferCSSPageSize: true,
-        });
+        }));
         res.set({
             'Content-Type': 'application/pdf',
             'Content-Length': pdfBuffer.length,
