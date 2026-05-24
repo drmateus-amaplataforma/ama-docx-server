@@ -8,12 +8,45 @@ const { v4: uuidv4 } = require('uuid');
 const multer = require('multer');
 const upload = multer({ storage: multer.memoryStorage() });
 const Anthropic = require('@anthropic-ai/sdk');
+const puppeteer = require('puppeteer-core');
 
 const execFileAsync = promisify(execFile);
 const app = express();
 const PORT = process.env.PORT || 3000;
+const CHROMIUM_PATH = process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/chromium';
 
 app.use(express.json({ limit: '50mb' }));
+
+// ============================================================
+// PUPPETEER BROWSER POOL (persistente, single-process)
+// ============================================================
+let browserPromise = null;
+async function getBrowser() {
+    if (browserPromise) {
+        try {
+            const b = await browserPromise;
+            if (b && b.isConnected()) return b;
+        } catch (_) {}
+        browserPromise = null;
+    }
+    browserPromise = puppeteer.launch({
+        headless: 'new',
+        executablePath: CHROMIUM_PATH,
+        args: [
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--disable-dev-shm-usage',
+            '--disable-gpu',
+            '--no-zygote',
+            '--single-process',
+            '--disable-extensions',
+        ],
+    }).catch((err) => {
+        browserPromise = null;
+        throw err;
+    });
+    return browserPromise;
+}
 
 // ============================================================
 // HELPERS
@@ -59,7 +92,50 @@ function parseJsonSafe(text) {
 // HEALTH
 // ============================================================
 app.get('/health', (req, res) => {
-    res.json({ status: 'ok', version: '3.0-MC', timestamp: new Date().toISOString() });
+    res.json({ status: 'ok', version: '3.1-MC-pdf', timestamp: new Date().toISOString() });
+});
+
+// ============================================================
+// GENERATE PDF (Puppeteer + Chromium)
+// Recebe { html, landscape?, format? } -> devolve bytes PDF
+// ============================================================
+optionsHandler('/generate-pdf', app);
+app.post('/generate-pdf', async (req, res) => {
+    setCors(res);
+    const { html, landscape = false, format = 'A4' } = req.body || {};
+    if (!html || typeof html !== 'string') {
+        return res.status(400).json({ error: 'html (string) eh obrigatorio' });
+    }
+    let page;
+    const t0 = Date.now();
+    try {
+        const browser = await getBrowser();
+        page = await browser.newPage();
+        await page.setContent(html, { waitUntil: 'networkidle0', timeout: 45000 });
+        const pdfBuffer = await page.pdf({
+            format,
+            landscape,
+            printBackground: true,
+            margin: { top: '0', right: '0', bottom: '0', left: '0' },
+            preferCSSPageSize: true,
+        });
+        res.set({
+            'Content-Type': 'application/pdf',
+            'Content-Length': pdfBuffer.length,
+        });
+        res.send(pdfBuffer);
+        console.log(`[generate-pdf] ok ${pdfBuffer.length}b ${Date.now() - t0}ms`);
+    } catch (err) {
+        console.error('[generate-pdf]', err.message);
+        const fatal = /disconnected|closed|target closed|protocol error/i.test(err.message);
+        if (fatal && browserPromise) {
+            try { const b = await browserPromise; if (b) await b.close(); } catch (_) {}
+            browserPromise = null;
+        }
+        res.status(500).json({ error: `Falha ao gerar PDF: ${err.message}` });
+    } finally {
+        if (page) { try { await page.close(); } catch (_) {} }
+    }
 });
 
 // ============================================================
